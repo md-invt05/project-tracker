@@ -9,9 +9,6 @@ jobs:
   build_test_lint:
     runs-on: ubuntu-latest
 
-    env:
-      WORKING_DIR: backend
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -19,7 +16,7 @@ jobs:
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '9.0.x' # поменяй на '9.0.x', если проект на .NET 9
+          dotnet-version: '9.0.x'   # либо 8.0.x, если проект под .NET 8
 
       - name: Cache NuGet packages
         uses: actions/cache@v4
@@ -29,37 +26,85 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nuget-
 
-      - name: Restore
-        run: dotnet restore "$WORKING_DIR"
-
-      - name: Build (Release)
-        run: dotnet build "$WORKING_DIR" --configuration Release --no-restore
-
-      # Если есть unit-тесты в solution/папках внутри backend, dotnet сам их найдёт.
-      # Покрытие собираем в формате Cobertura, чтобы потом приложить как артефакт.
-      - name: Test with coverage
+      # Ищем .sln (если есть) — будем собирать именно его
+      - name: Locate solution
+        id: sln
+        shell: bash
         run: |
-          dotnet test "$WORKING_DIR" \
+          SLN=$(git ls-files '*.sln' | head -n 1 || true)
+          echo "sln=$SLN" >> $GITHUB_OUTPUT
+          echo "Found solution: $SLN"
+
+      - name: Restore (solution)
+        if: steps.sln.outputs.sln != ''
+        run: dotnet restore "${{ steps.sln.outputs.sln }}"
+
+      - name: Restore (projects)
+        if: steps.sln.outputs.sln == ''
+        shell: bash
+        run: |
+          set -e
+          PROJS=$(git ls-files '**/*.csproj')
+          for p in $PROJS; do
+            echo "Restoring $p"
+            dotnet restore "$p"
+          done
+
+      - name: Build (solution)
+        if: steps.sln.outputs.sln != ''
+        run: dotnet build "${{ steps.sln.outputs.sln }}" --configuration Release --no-restore
+
+      - name: Build (projects)
+        if: steps.sln.outputs.sln == ''
+        shell: bash
+        run: |
+          set -e
+          PROJS=$(git ls-files '**/*.csproj')
+          for p in $PROJS; do
+            echo "Building $p"
+            dotnet build "$p" --configuration Release --no-restore
+          done
+
+      # Тесты: если есть .sln — тестируем решение; иначе ищем тест-проекты по маске
+      - name: Test (solution) with coverage
+        if: steps.sln.outputs.sln != ''
+        run: |
+          dotnet test "${{ steps.sln.outputs.sln }}" \
             --configuration Release \
             --no-build \
             --collect:"XPlat Code Coverage" \
             --logger "trx;LogFileName=tests.trx"
 
-      # Аналог "линтера": проверка форматирования и стиля.
-      # dotnet-format отдаёт отчёт в SARIF и фейлит шаг при несоответствиях.
-      # Мы сохраняем отчет и не валим весь джоб (|| true) — как в твоём pylint-примере.
+      - name: Test (projects) with coverage
+        if: steps.sln.outputs.sln == ''
+        shell: bash
+        run: |
+          set -e
+          TESTS=$(git ls-files '*Test*.csproj' '*Tests*.csproj' || true)
+          if [ -z "$TESTS" ]; then
+            echo "No test projects found — skipping tests."; exit 0
+          fi
+          for t in $TESTS; do
+            echo "Testing $t"
+            dotnet test "$t" \
+              --configuration Release \
+              --no-build \
+              --collect:"XPlat Code Coverage" \
+              --logger "trx;LogFileName=tests.trx"
+          done
+
       - name: Install dotnet-format
         run: dotnet tool update -g dotnet-format
 
       - name: Check code style (dotnet-format)
+        shell: bash
         run: |
-          ~/.dotnet/tools/dotnet-format "$WORKING_DIR" \
+          # Проверяем весь репозиторий; пишем отчёт и не роняем сборку (как с pylint || true)
+          ~/.dotnet/tools/dotnet-format \
             --verify-no-changes \
             --report ./format.sarif \
             --verbosity diagnostic || true
 
-      # Сбор артефактов — как ты делал с pylint (lint.txt),
-      # прикладываем результаты тестов и покрытия.
       - name: Upload Test & Coverage Artifacts
         uses: actions/upload-artifact@v4
         with:
