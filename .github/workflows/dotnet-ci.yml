@@ -1,0 +1,70 @@
+name: .NET CI
+
+on:
+  pull_request:
+    branches:
+      - dev
+
+jobs:
+  build_test_lint:
+    runs-on: ubuntu-latest
+
+    env:
+      WORKING_DIR: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x' # поменяй на '9.0.x', если проект на .NET 9
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore
+        run: dotnet restore "$WORKING_DIR"
+
+      - name: Build (Release)
+        run: dotnet build "$WORKING_DIR" --configuration Release --no-restore
+
+      # Если есть unit-тесты в solution/папках внутри backend, dotnet сам их найдёт.
+      # Покрытие собираем в формате Cobertura, чтобы потом приложить как артефакт.
+      - name: Test with coverage
+        run: |
+          dotnet test "$WORKING_DIR" \
+            --configuration Release \
+            --no-build \
+            --collect:"XPlat Code Coverage" \
+            --logger "trx;LogFileName=tests.trx"
+
+      # Аналог "линтера": проверка форматирования и стиля.
+      # dotnet-format отдаёт отчёт в SARIF и фейлит шаг при несоответствиях.
+      # Мы сохраняем отчет и не валим весь джоб (|| true) — как в твоём pylint-примере.
+      - name: Install dotnet-format
+        run: dotnet tool update -g dotnet-format
+
+      - name: Check code style (dotnet-format)
+        run: |
+          ~/.dotnet/tools/dotnet-format "$WORKING_DIR" \
+            --verify-no-changes \
+            --report ./format.sarif \
+            --verbosity diagnostic || true
+
+      # Сбор артефактов — как ты делал с pylint (lint.txt),
+      # прикладываем результаты тестов и покрытия.
+      - name: Upload Test & Coverage Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dotnet-test-and-coverage
+          path: |
+            **/TestResults/**/*.trx
+            **/TestResults/**/coverage.cobertura.xml
+            format.sarif
